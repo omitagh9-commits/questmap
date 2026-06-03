@@ -14,11 +14,16 @@ let timerState = "idle"; // "idle" | "running" | "paused"
 // DOM要素の参照
 const homeView = document.getElementById("home-view");
 const roadmapView = document.getElementById("roadmap-view");
+const authView = document.getElementById("auth-view");
 const goalsListContainer = document.getElementById("goals-list-container");
 const goalsEmptyState = document.getElementById("goals-empty-state");
+const syncLoadingOverlay = document.getElementById("sync-loading-overlay");
 
 // ヘッダー・スタッツ要素
 const headerLogo = document.getElementById("header-logo");
+const headerActionsLoggedIn = document.getElementById("header-actions-logged-in");
+const userEmailDisplay = document.getElementById("user-email-display");
+const logoutBtn = document.getElementById("logout-btn");
 const addGoalBtnHeader = document.getElementById("add-goal-btn-header");
 const addGoalBtnEmpty = document.getElementById("add-goal-btn-empty");
 const statActiveGoals = document.getElementById("stat-active-goals");
@@ -108,36 +113,109 @@ const timerCancelBtn = document.getElementById("timer-cancel-btn");
 const timerFinishBtn = document.getElementById("timer-finish-btn");
 const timerRingContainer = document.querySelector(".timer-ring-container");
 
+// 認証関連要素の参照
+const tabLogin = document.getElementById("tab-login");
+const tabSignup = document.getElementById("tab-signup");
+const loginForm = document.getElementById("login-form");
+const signupForm = document.getElementById("signup-form");
+const loginEmailInput = document.getElementById("login-email");
+const loginPasswordInput = document.getElementById("login-password");
+const signupEmailInput = document.getElementById("signup-email");
+const signupPasswordInput = document.getElementById("signup-password");
+const loginErrorMsg = document.getElementById("login-error");
+const signupErrorMsg = document.getElementById("signup-error");
+
 /* ==========================================
-   INITIALIZATION & DATA LOADING
+   FIREBASE AUTHENTICATION & INITIAL STATE
    ========================================== */
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadData();
   setupEventListeners();
-  renderDashboard();
+  initFirebaseAuth();
 });
 
-// ローカルストレージからデータ読み込み
-function loadData() {
-  const storedGoals = localStorage.getItem("questmap_goals");
-  if (storedGoals) {
-    try {
-      goals = JSON.parse(storedGoals);
-    } catch (e) {
-      console.error("データの読み込みに失敗しました。デフォルトデータを使用します。", e);
-      goals = [...DEFAULT_GOALS];
+// Firebase Authの監視初期化
+function initFirebaseAuth() {
+  showLoading(true);
+  
+  if (typeof auth === "undefined" || typeof db === "undefined") {
+    // 構成がまだ記述されていない場合
+    showLoading(false);
+    authView.innerHTML = `
+      <div class="auth-card glass" style="max-width:540px; text-align:center;">
+        <h2>Firebaseの設定が必要です</h2>
+        <p style="color:var(--text-muted); font-size:0.9rem; margin:1rem 0; line-height:1.6;">
+          <code>firebaseConfig.js</code> に、ご自身のFirebaseプロジェクトの接続情報を設定してください。<br>
+          詳細手順は、リポジトリフォルダ内の <strong>README.md</strong> または <strong>github_pages_deployment_guide.md</strong> に記載されています。
+        </p>
+      </div>
+    `;
+    showView("auth");
+    return;
+  }
+
+  // ログイン状態変更の監視
+  auth.onAuthStateChanged(async (user) => {
+    if (user) {
+      // ログイン中
+      headerActionsLoggedIn.classList.remove("hidden");
+      userEmailDisplay.textContent = user.email;
+      
+      try {
+        showLoading(true);
+        // Firestoreからユーザーデータを取得
+        const docRef = db.collection("users").doc(user.uid);
+        const doc = await docRef.get();
+        
+        if (doc.exists) {
+          goals = doc.data().goals || [];
+        } else {
+          // 新規ユーザーの場合はモックデータで初期化してFirestoreに保存
+          goals = JSON.parse(JSON.stringify(DEFAULT_GOALS));
+          await docRef.set({ goals });
+        }
+        
+        showLoading(false);
+        showView("home");
+      } catch (error) {
+        console.error("Firestoreのロードエラー:", error);
+        alert("データの読み込みに失敗しました。時間をおいて再試行してください。");
+        showLoading(false);
+      }
+    } else {
+      // ログアウト状態
+      headerActionsLoggedIn.classList.add("hidden");
+      userEmailDisplay.textContent = "--";
+      goals = [];
+      currentGoalId = null;
+      
+      showLoading(false);
+      showView("auth");
     }
-  } else {
-    // 初回起動時はデフォルトモックデータを設定
-    goals = [...DEFAULT_GOALS];
-    saveGoals();
+  });
+}
+
+// クラウド（Firestore）へデータを同期保存
+async function saveGoals() {
+  const user = auth.currentUser;
+  if (!user) return;
+  
+  try {
+    // UIを軽快にするため非同期で裏側で同期保存（楽観的UI）
+    await db.collection("users").doc(user.uid).set({ goals });
+  } catch (error) {
+    console.error("Firestoreへの保存エラー:", error);
+    alert("クラウドデータの同期に失敗しました。接続状態を確認してください。");
   }
 }
 
-// ローカルストレージへ保存
-function saveGoals() {
-  localStorage.setItem("questmap_goals", JSON.stringify(goals));
+// ローディング表示制御
+function showLoading(isActive) {
+  if (isActive) {
+    syncLoadingOverlay.classList.add("active");
+  } else {
+    syncLoadingOverlay.classList.remove("active");
+  }
 }
 
 /* ==========================================
@@ -327,6 +405,7 @@ function generateUniqueId() {
 function showView(viewId) {
   homeView.classList.remove("active");
   roadmapView.classList.remove("active");
+  authView.classList.remove("active");
   
   if (viewId === "home") {
     homeView.classList.add("active");
@@ -334,6 +413,8 @@ function showView(viewId) {
   } else if (viewId === "roadmap") {
     roadmapView.classList.add("active");
     renderRoadmapDetails();
+  } else if (viewId === "auth") {
+    authView.classList.add("active");
   }
 }
 
@@ -342,7 +423,6 @@ function showView(viewId) {
    ========================================== */
 
 function renderDashboard() {
-  // グローバルスタッツの更新
   statActiveGoals.textContent = goals.length;
   
   let totalProgSum = 0;
@@ -366,7 +446,6 @@ function renderDashboard() {
   statLastStudy.textContent = globalLatestStudy ? formatDateTimeDisplay(globalLatestStudy) : "記録なし";
   statTotalStudyTime.textContent = formatStudyTime(totalStudySeconds);
 
-  // リストの描画
   goalsListContainer.innerHTML = "";
   
   if (goals.length === 0) {
@@ -431,7 +510,6 @@ function renderDashboard() {
       </div>
     `;
     
-    // カード全体クリックでもロードマップへ遷移（ボタン以外をクリックした場合）
     card.addEventListener("click", (e) => {
       if (!e.target.closest("button")) {
         currentGoalId = goal.id;
@@ -442,7 +520,6 @@ function renderDashboard() {
     goalsListContainer.appendChild(card);
   });
   
-  // ボタン類のイベントバインド
   document.querySelectorAll(".view-roadmap-btn").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -463,7 +540,6 @@ function renderRoadmapDetails() {
     return;
   }
   
-  // ヘッダー情報とパンくずの更新
   goalBreadcrumbTitle.textContent = goal.title;
   detailGoalTitle.textContent = goal.title;
   detailGoalDesc.textContent = goal.description || "説明はありません。";
@@ -476,7 +552,6 @@ function renderRoadmapDetails() {
   detailGoalStatus.className = `badge ${progress === 100 ? 'badge-blue' : 'badge-purple'}`;
   detailGoalStudyTime.textContent = formatStudyTime(studySeconds);
   
-  // 円形プログレスバーの更新
   detailProgressPercent.textContent = `${progress}%`;
   const radius = 40;
   const circumference = 2 * Math.PI * radius; // 約 251.2
@@ -484,7 +559,6 @@ function renderRoadmapDetails() {
   detailProgressCircle.style.strokeDasharray = `${circumference} ${circumference}`;
   detailProgressCircle.style.strokeDashoffset = offset;
   
-  // ロードマップツリーの描画
   roadmapTreeContainer.innerHTML = "";
   if (!goal.roadmap || goal.roadmap.length === 0) {
     roadmapTreeContainer.innerHTML = `
@@ -498,7 +572,6 @@ function renderRoadmapDetails() {
     });
   }
   
-  // サイドバー学習サマリーの描画
   renderProgressBreakdown(goal);
 }
 
@@ -509,9 +582,6 @@ function createTreeNodeHTML(node, level, pathIndices) {
   const nodeStudySeconds = calculateNodeStudyTime(node);
   
   if (hasChildren) {
-    // ------------------------------------------
-    // カテゴリノード (Level 1 または Level 2)
-    // ------------------------------------------
     const container = document.createElement("div");
     container.className = `tree-level-${level}`;
     container.id = `node-container-${node.id}`;
@@ -548,15 +618,12 @@ function createTreeNodeHTML(node, level, pathIndices) {
       content.style.display = "flex";
     }
     
-    // 子ノードのレンダリング
     node.children.forEach((childNode, cIdx) => {
       const childHTML = createTreeNodeHTML(childNode, level + 1, [...pathIndices, cIdx]);
       content.appendChild(childHTML);
     });
     
-    // アコーディオン開閉イベント
     header.addEventListener("click", (e) => {
-      // 各種アクションボタンのクリック時は開閉しない
       if (e.target.closest("button")) {
         return;
       }
@@ -571,7 +638,6 @@ function createTreeNodeHTML(node, level, pathIndices) {
       }
     });
 
-    // 各アクションボタンの処理
     header.querySelector(".add-child-node-btn-small").addEventListener("click", (e) => {
       e.stopPropagation();
       openNodeModal(node.id);
@@ -592,9 +658,6 @@ function createTreeNodeHTML(node, level, pathIndices) {
     return container;
     
   } else {
-    // ------------------------------------------
-    // 葉ノード (末端の勉強項目)
-    // ------------------------------------------
     const leaf = document.createElement("div");
     leaf.className = "tree-level-3-leaf";
     leaf.dataset.id = node.id;
@@ -631,16 +694,13 @@ function createTreeNodeHTML(node, level, pathIndices) {
       </div>
     `;
     
-    // クリックで学習進捗モーダル表示
     leaf.addEventListener("click", (e) => {
-      // アクションボタンクリック時はモーダルを開かない
       if (e.target.closest("button")) {
         return;
       }
       openLeafEditorModal(node.id, pathIndices);
     });
 
-    // アクションイベントハンドラ
     leaf.querySelector(".start-study-btn-small").addEventListener("click", (e) => {
       e.stopPropagation();
       openTimerModal(node.id, pathIndices);
@@ -829,7 +889,6 @@ function openNodeModal(preselectedParentId = "root") {
   
   populateSelect(goal.roadmap);
   
-  // 親ノードのデフォルト値設定（インライン「＋」押下時はそのIDを自動指定）
   nodeParentSelect.value = preselectedParentId;
   
   typeCategory.checked = true;
@@ -884,7 +943,6 @@ function openTimerModal(nodeId, pathIndices) {
   timerNodePath.textContent = pathText;
   timerNodeTitle.textContent = targetNode.title;
   
-  // タイマー状態初期化
   timerSecondsElapsed = 0;
   timerState = "idle";
   
@@ -892,7 +950,6 @@ function openTimerModal(nodeId, pathIndices) {
   timerSessionTime.textContent = "0分00秒";
   timerAccumulatedTime.textContent = formatStudyTime(targetNode.studyTime || 0);
   
-  // ボタン類の表示リセット
   timerStartBtn.classList.remove("hidden");
   timerPauseBtn.classList.add("hidden");
   timerResumeBtn.classList.add("hidden");
@@ -971,9 +1028,7 @@ function finishStudyTimer() {
   
   const node = findNodeById(goal.roadmap, timerCurrentNodeId);
   if (node) {
-    // 累計学習時間を加算
     node.studyTime = (node.studyTime || 0) + timerSecondsElapsed;
-    // 最終勉強日時を更新
     node.lastStudied = new Date().toISOString();
     
     saveGoals();
@@ -993,12 +1048,112 @@ function cancelStudyTimer() {
 }
 
 /* ==========================================
+   AUTHENTICATION LOGICS (LOGIN / SIGNUP)
+   ========================================== */
+
+function setupAuthTabs() {
+  tabLogin.addEventListener("click", () => {
+    tabLogin.classList.add("active");
+    tabSignup.classList.remove("active");
+    loginForm.classList.add("active");
+    signupForm.classList.remove("active");
+    signupErrorMsg.classList.add("hidden");
+  });
+
+  tabSignup.addEventListener("click", () => {
+    tabSignup.classList.add("active");
+    tabLogin.classList.remove("active");
+    signupForm.classList.add("active");
+    loginForm.classList.remove("active");
+    loginErrorMsg.classList.add("hidden");
+  });
+}
+
+// ユーザー向けフレンドリーエラーメッセージ変換
+function getFriendlyErrorMessage(error) {
+  switch (error.code) {
+    case "auth/invalid-email":
+      return "無効なメールアドレス形式です。";
+    case "auth/user-disabled":
+      return "このアカウントは無効化されています。";
+    case "auth/user-not-found":
+      return "ユーザーが見つかりません。アカウントを作成してください。";
+    case "auth/wrong-password":
+      return "パスワードが正しくありません。";
+    case "auth/email-already-in-use":
+      return "このメールアドレスは既に登録されています。";
+    case "auth/weak-password":
+      return "パスワードは6文字以上で設定してください。";
+    case "auth/network-request-failed":
+      return "ネットワーク接続に失敗しました。";
+    default:
+      return error.message;
+  }
+}
+
+/* ==========================================
    EVENT LISTENERS Setup
    ========================================== */
 
 function setupEventListeners() {
+  // 認証タブ切り替えの設定
+  setupAuthTabs();
+
+  // ログインフォーム送信
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = loginEmailInput.value.trim();
+    const password = loginPasswordInput.value;
+    
+    loginErrorMsg.classList.add("hidden");
+    showLoading(true);
+    
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+    } catch (error) {
+      console.error("ログイン失敗:", error);
+      loginErrorMsg.textContent = getFriendlyErrorMessage(error);
+      loginErrorMsg.classList.remove("hidden");
+      showLoading(false);
+    }
+  });
+
+  // 新規登録フォーム送信
+  signupForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = signupEmailInput.value.trim();
+    const password = signupPasswordInput.value;
+    
+    signupErrorMsg.classList.add("hidden");
+    showLoading(true);
+    
+    try {
+      await auth.createUserWithEmailAndPassword(email, password);
+    } catch (error) {
+      console.error("新規登録失敗:", error);
+      signupErrorMsg.textContent = getFriendlyErrorMessage(error);
+      signupErrorMsg.classList.remove("hidden");
+      showLoading(false);
+    }
+  });
+
+  // ログアウトボタン
+  logoutBtn.addEventListener("click", async () => {
+    if (confirm("ログアウトしますか？")) {
+      showLoading(true);
+      try {
+        await auth.signOut();
+      } catch (error) {
+        console.error("ログアウト失敗:", error);
+        showLoading(false);
+      }
+    }
+  });
+
   // ロゴクリックでホームに戻る
-  headerLogo.addEventListener("click", () => showView("home"));
+  headerLogo.addEventListener("click", () => {
+    if (auth.currentUser) showView("home");
+  });
   
   // 戻るボタン
   backToHomeBtn.addEventListener("click", () => showView("home"));
@@ -1017,7 +1172,7 @@ function setupEventListeners() {
     const goal = goals.find(g => g.id === currentGoalId);
     if (!goal) return;
     
-    if (confirm(`目標「${goal.title}」を削除しますか？\n登録した学習記録もすべて消去されます。`)) {
+    if (confirm(`目標「${goal.title}」を削除しますか？\nクラウドに保存された学習記録もすべて消去されます。`)) {
       goals = goals.filter(g => g.id !== currentGoalId);
       saveGoals();
       showView("home");
@@ -1101,7 +1256,6 @@ function setupEventListeners() {
     const date = goalFormDate.value;
     
     if (id) {
-      // 更新処理
       const goal = goals.find(g => g.id === id);
       if (goal) {
         goal.title = title;
@@ -1109,7 +1263,6 @@ function setupEventListeners() {
         goal.targetDate = date;
       }
     } else {
-      // 新規登録処理
       const templateType = goalFormTemplate.value;
       const templateData = ROADMAP_TEMPLATES[templateType];
       
